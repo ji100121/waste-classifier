@@ -1,3 +1,67 @@
+import os
+import json
+import base64
+import urllib.request
+import urllib.error
+from flask import Flask, request
+
+app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
+
+CATEGORIES = [
+    "플라스틱",
+    "종이",
+    "일반쓰레기",
+    "캔",
+    "비닐",
+    "유리",
+    "라벨이 있는 플라스틱병",
+]
+
+
+def plain_text(message, status=200):
+    return message, status, {"Content-Type": "text/plain; charset=utf-8"}
+
+
+@app.route("/", methods=["GET"])
+def home():
+    return "Waste classifier server is running!"
+
+
+@app.route("/classify", methods=["POST"])
+def classify():
+    # MIT App Inventor Web1.PostFile sends raw image bytes.
+    image_data = request.get_data()
+    if not image_data:
+        return plain_text("사진이 없습니다.", 400)
+
+    if image_data.startswith(b"\xff\xd8\xff"):
+        image_type = "image/jpeg"
+    elif image_data.startswith(b"\x89PNG\r\n\x1a\n"):
+        image_type = "image/png"
+    elif image_data.startswith(b"RIFF") and image_data[8:12] == b"WEBP":
+        image_type = "image/webp"
+    else:
+        return plain_text("지원하지 않는 이미지 형식입니다.", 400)
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        return plain_text("서버에 API 키가 설정되지 않았습니다.", 500)
+
+    image_base64 = base64.b64encode(image_data).decode("ascii")
+    image_url = "data:" + image_type + ";base64," + image_base64
+
+    prompt = (
+        "당신은 쓰레기 분류 전문가입니다. 첨부된 사진에서 주된 쓰레기를 "
+        "다음 일곱 분류 중 정확히 하나로 분류하세요: "
+        + ", ".join(CATEGORIES)
+        + ". 라벨이 붙은 플라스틱병은 '라벨이 있는 플라스틱병'을 우선 선택하세요. "
+        "분류명 하나만 정확히 출력하고 다른 설명은 하지 마세요."
+    )
+
+    payload = {
+        "model": "gpt-4.1-mini",
+        "input": [
             {
                 "role": "user",
                 "content": [
