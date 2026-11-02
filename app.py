@@ -1,26 +1,19 @@
+
 import os
-import json
 import base64
-import urllib.request
-import urllib.error
-from flask import Flask, request
+
+from flask import Flask, request, Response
+from openai import OpenAI
 
 app = Flask(__name__)
-app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024
 
+# ★ AI가 반환할 수 있는 결과
 CATEGORIES = [
-    "플라스틱",
-    "종이",
+    "재활용",
     "일반쓰레기",
-    "캔",
     "비닐",
-    "유리",
-    "라벨이 있는 플라스틱병",
+    "라벨이 붙은 플라스틱"
 ]
-
-
-def plain_text(message, status=200):
-    return message, status, {"Content-Type": "text/plain; charset=utf-8"}
 
 
 @app.route("/", methods=["GET"])
@@ -30,82 +23,130 @@ def home():
 
 @app.route("/classify", methods=["POST"])
 def classify():
-    # MIT App Inventor Web1.PostFile sends raw image bytes.
-    image_data = request.get_data()
-    if not image_data:
-        return plain_text("사진이 없습니다.", 400)
 
-    if image_data.startswith(b"\xff\xd8\xff"):
-        image_type = "image/jpeg"
-    elif image_data.startswith(b"\x89PNG\r\n\x1a\n"):
-        image_type = "image/png"
-    elif image_data.startswith(b"RIFF") and image_data[8:12] == b"WEBP":
-        image_type = "image/webp"
-    else:
-        return plain_text("지원하지 않는 이미지 형식입니다.", 400)
+    # 앱인벤터에서 보낸 사진 받기
+    image_bytes = request.get_data()
+
+    if not image_bytes:
+        return Response(
+            "사진이 없습니다.",
+            status=400,
+            content_type="text/plain; charset=utf-8"
+        )
 
     api_key = os.environ.get("OPENAI_API_KEY")
+
     if not api_key:
-        return plain_text("서버에 API 키가 설정되지 않았습니다.", 500)
-
-    image_base64 = base64.b64encode(image_data).decode("ascii")
-    image_url = "data:" + image_type + ";base64," + image_base64
-
-    prompt = (
-        "당신은 쓰레기 분류 전문가입니다. 첨부된 사진에서 주된 쓰레기를 "
-        "다음 일곱 분류 중 정확히 하나로 분류하세요: "
-        + ", ".join(CATEGORIES)
-        + ". 라벨이 붙은 플라스틱병은 '라벨이 있는 플라스틱병'을 우선 선택하세요. "
-        "분류명 하나만 정확히 출력하고 다른 설명은 하지 마세요."
-    )
-
-    payload = {
-        "model": "gpt-4.1-mini",
-        "input": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "input_text", "text": prompt},
-                    {"type": "input_image", "image_url": image_url, "detail": "low"},
-                ],
-            }
-        ],
-        "max_output_tokens": 50,
-    }
-
-    req = urllib.request.Request(
-        "https://api.openai.com/v1/responses",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": "Bearer " + api_key,
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
+        return Response(
+            "API 키가 없습니다.",
+            status=500,
+            content_type="text/plain; charset=utf-8"
+        )
 
     try:
-        with urllib.request.urlopen(req, timeout=60) as response:
-            result = json.loads(response.read().decode("utf-8"))
+        client = OpenAI(api_key=api_key)
 
-        answer = ""
-        for item in result.get("output", []):
-            if item.get("type") == "message":
-                for part in item.get("content", []):
-                    if part.get("type") == "output_text":
-                        answer += part.get("text", "")
+        image_base64 = base64.b64encode(
+            image_bytes
+        ).decode("utf-8")
 
-        category = answer.strip()
-        if category not in CATEGORIES:
-            return plain_text("분류 실패")
-        return plain_text(category)
+        image_url = (
+            "data:image/jpeg;base64," + image_base64
+        )
 
-    except urllib.error.HTTPError as error:
-        print("OpenAI API 오류:", error.code, error.read().decode("utf-8", errors="replace"))
-        return plain_text("AI 분석 오류", 502)
-    except Exception as error:
-        print("서버 오류:", str(error))
-        return plain_text("서버 오류", 500)
+        response = client.chat.completions.create(
+            model="gpt-4.1-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": """
+너는 쓰레기 분리배출 AI야.
+
+사진 속 주요 쓰레기 하나를 판단해.
+
+반드시 다음 4가지 결과 중 하나만 반환해.
+
+1. 재활용
+2. 일반쓰레기
+3. 비닐
+4. 라벨이 붙은 플라스틱
+
+분류 기준:
+
+- 플라스틱, 캔, 유리, 종이 등
+  재활용 가능한 쓰레기는 "재활용"
+
+- 깨끗한 비닐봉지나 비닐 포장재는 "비닐"
+
+- 오염된 휴지 등 재활용이 어려운
+  쓰레기는 "일반쓰레기"
+
+- 플라스틱병에 제거 가능한 라벨이
+  붙어 있는 것이 보이면
+  "라벨이 붙은 플라스틱"
+
+- 라벨이 없는 플라스틱병은 "재활용"
+
+라벨이 붙은 플라스틱병은
+다른 분류보다 우선해서 판단해.
+
+사진에서 라벨이 확인되지 않으면
+라벨이 있다고 추측하지 마.
+
+반드시 위 4가지 중 하나의
+문구만 반환해.
+
+설명, JSON, 기호는 추가하지 마.
+"""
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "이 쓰레기를 분류해 줘."
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": image_url
+                            }
+                        }
+                    ]
+                }
+            ],
+            max_tokens=100
+        )
+
+        result = (
+            response.choices[0].message.content
+            or ""
+        ).strip()
+
+        if result not in CATEGORIES:
+            return Response(
+                "분류 결과 오류",
+                status=500,
+                content_type="text/plain; charset=utf-8"
+            )
+
+        return Response(
+            result,
+            content_type="text/plain; charset=utf-8"
+        )
+
+    except Exception as e:
+        print("Classification error:", str(e))
+
+        return Response(
+            "서버 오류",
+            status=500,
+            content_type="text/plain; charset=utf-8"
+        )
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    app.run(
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", 10000))
+    )
