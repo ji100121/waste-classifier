@@ -7,7 +7,7 @@ from openai import OpenAI
 
 app = Flask(__name__)
 
-# AI 분류 결과.
+# AI 분류 결과
 CATEGORIES = [
     "재활용",
     "일반쓰레기",
